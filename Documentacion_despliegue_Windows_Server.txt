@@ -1,0 +1,443 @@
+DOCUMENTACION PARA DESPLEGAR SPORT STORE POS EN UN SERVIDOR WINDOWS NUEVO
+=========================================================================
+
+Objetivo:
+Desplegar la aplicacion Sport Store POS en un servidor Windows nuevo.
+
+La aplicacion usa contenedores Linux:
+- App: Node.js/Express + frontend Vue compilado
+- Base de datos: MariaDB
+
+IMPORTANTE:
+Docker Desktop NO esta soportado en Windows Server.
+Por eso, para un Windows Server nuevo, la arquitectura recomendada es:
+
+Windows Server
+  -> Hyper-V
+    -> VM Linux Ubuntu Server
+      -> Docker Engine + Docker Compose
+        -> Contenedor app
+        -> Contenedor MariaDB
+
+Esta guia evita depender de Docker Desktop y permite correr correctamente
+imagenes Linux como node:22-alpine y mariadb:11.4.
+
+
+1. REQUISITOS
+-------------
+
+Servidor Windows:
+- Windows Server 2019, 2022 o superior.
+- Usuario administrador.
+- Virtualizacion habilitada en BIOS/UEFI.
+- Rol Hyper-V disponible.
+- Minimo recomendado: 4 CPU, 8 GB RAM, 80 GB disco.
+
+VM Linux recomendada:
+- Ubuntu Server 22.04 LTS o 24.04 LTS.
+- Minimo recomendado para la VM: 2 CPU, 4 GB RAM, 40 GB disco.
+- Red en modo bridge o switch externo para que otros equipos accedan.
+
+Puertos:
+- 3000/TCP: aplicacion web.
+- 3306/TCP: MariaDB, solo si se requiere acceso externo a la base de datos.
+  Si no se requiere, no exponerlo fuera del servidor.
+
+
+2. PREPARAR LA IMAGEN DE LA APLICACION EN UNA MAQUINA CON DOCKER
+-----------------------------------------------------------------
+
+Este paso se hace en la maquina donde esta el codigo fuente y que ya tenga Docker.
+
+Entrar a la carpeta del proyecto:
+
+cd "C:\Users\jjimenezg\OneDrive - NUEVA EPS\Documentos\app"
+
+Construir la imagen de la aplicacion:
+
+docker compose build app
+
+Exportar la imagen de la aplicacion:
+
+docker save -o sport-store-pos-app_1.0.tar sport-store-pos-app:1.0
+
+Si el servidor no tendra internet, tambien exportar la imagen de MariaDB:
+
+docker pull mariadb:11.4
+docker save -o mariadb_11.4.tar mariadb:11.4
+
+
+3. PREPARAR PAQUETE PARA COPIAR AL SERVIDOR
+-------------------------------------------
+
+Crear una carpeta llamada paquete_despliegue con esta estructura:
+
+paquete_despliegue/
+  sport-store-pos-app_1.0.tar
+  mariadb_11.4.tar
+  docker-compose.server.yml
+  .env.example
+  db/
+    init/
+      001_schema.sql
+
+Nota:
+- mariadb_11.4.tar es obligatorio solo si la VM Linux no tendra internet.
+- Si la VM tiene internet, Docker puede descargar mariadb:11.4 automaticamente.
+
+Comprimir el paquete:
+
+Compress-Archive -Path ".\paquete_despliegue" -DestinationPath ".\paquete_despliegue_sport_store.zip" -Force
+
+Copiar paquete_despliegue_sport_store.zip al servidor Windows.
+
+
+4. HABILITAR HYPER-V EN WINDOWS SERVER
+--------------------------------------
+
+Abrir PowerShell como Administrador en el servidor Windows y ejecutar:
+
+Install-WindowsFeature -Name Hyper-V -IncludeManagementTools -Restart
+
+El servidor se reiniciara.
+
+Despues del reinicio, verificar adaptadores de red:
+
+Get-NetAdapter
+
+Crear un switch virtual externo para que la VM tenga acceso a la red:
+
+New-VMSwitch -Name "ExternalSwitch" -NetAdapterName "NOMBRE_DEL_ADAPTADOR" -AllowManagementOS $true
+
+Ejemplo:
+
+New-VMSwitch -Name "ExternalSwitch" -NetAdapterName "Ethernet" -AllowManagementOS $true
+
+
+5. CREAR VM UBUNTU SERVER
+-------------------------
+
+Descargar ISO de Ubuntu Server 22.04 LTS o 24.04 LTS desde la pagina oficial.
+
+Desde Hyper-V Manager:
+
+1. New -> Virtual Machine.
+2. Nombre: sport-store-linux.
+3. Generation: Generation 2.
+4. Memoria: 4096 MB minimo.
+5. Red: ExternalSwitch.
+6. Disco: 40 GB minimo.
+7. Instalar desde ISO de Ubuntu Server.
+8. Finalizar y arrancar la VM.
+
+Durante instalacion de Ubuntu:
+
+1. Configurar idioma y teclado.
+2. Configurar red.
+3. Crear usuario administrador.
+4. Activar OpenSSH Server si aparece la opcion.
+5. Finalizar instalacion.
+
+Despues de instalar, entrar a la VM y actualizar:
+
+sudo apt update
+sudo apt upgrade -y
+
+
+6. INSTALAR DOCKER ENGINE EN LA VM UBUNTU
+-----------------------------------------
+
+Ejecutar dentro de Ubuntu:
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+Agregar repositorio oficial de Docker:
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo ${UBUNTU_CODENAME:-$VERSION_CODENAME}) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+Instalar Docker Engine y Compose plugin:
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+Activar servicio:
+
+sudo systemctl enable docker
+sudo systemctl start docker
+
+Permitir usar docker sin sudo para el usuario actual:
+
+sudo usermod -aG docker $USER
+
+Cerrar sesion y volver a entrar, o ejecutar:
+
+newgrp docker
+
+Verificar:
+
+docker --version
+docker compose version
+docker run hello-world
+
+
+7. COPIAR EL PAQUETE A LA VM LINUX
+----------------------------------
+
+Opcion A: Usando SCP desde Windows hacia la VM.
+
+Desde PowerShell en Windows:
+
+scp .\paquete_despliegue_sport_store.zip usuario@IP_DE_LA_VM:/home/usuario/
+
+Ejemplo:
+
+scp .\paquete_despliegue_sport_store.zip admin@192.168.1.60:/home/admin/
+
+Opcion B: Copiar por carpeta compartida, SFTP o herramienta corporativa.
+
+
+8. DESCOMPRIMIR PAQUETE EN LA VM
+--------------------------------
+
+Entrar por SSH o consola de Hyper-V:
+
+ssh usuario@IP_DE_LA_VM
+
+Instalar unzip si hace falta:
+
+sudo apt install -y unzip
+
+Crear carpeta de despliegue:
+
+mkdir -p ~/sport-store-pos
+
+Descomprimir:
+
+unzip ~/paquete_despliegue_sport_store.zip -d ~/sport-store-pos
+
+Entrar a la carpeta:
+
+cd ~/sport-store-pos/paquete_despliegue
+
+
+9. CARGAR IMAGENES DOCKER
+-------------------------
+
+Cargar imagen de la aplicacion:
+
+docker load -i sport-store-pos-app_1.0.tar
+
+Si la VM no tiene internet, cargar tambien MariaDB:
+
+docker load -i mariadb_11.4.tar
+
+Verificar imagenes:
+
+docker images
+
+Debe aparecer:
+
+sport-store-pos-app   1.0
+mariadb               11.4
+
+
+10. CONFIGURAR VARIABLES DE ENTORNO
+-----------------------------------
+
+Crear .env:
+
+cp .env.example .env
+
+Editar:
+
+nano .env
+
+Configurar valores:
+
+APP_PORT=3000
+DB_PORT=3306
+DB_NAME=sport_store
+DB_USER=sport_user
+DB_PASSWORD=CAMBIAR_CLAVE_SEGURA
+MARIADB_ROOT_PASSWORD=CAMBIAR_ROOT_SEGURA
+JWT_SECRET=CAMBIAR_TEXTO_LARGO_SEGURO
+TZ=America/Bogota
+
+Guardar con:
+- Ctrl + O
+- Enter
+- Ctrl + X
+
+IMPORTANTE:
+Configurar .env antes del primer arranque. MariaDB crea base de datos y usuario
+cuando se inicializa el volumen por primera vez.
+
+
+11. LEVANTAR LA APLICACION
+--------------------------
+
+Ejecutar:
+
+docker compose -f docker-compose.server.yml up -d
+
+Ver estado:
+
+docker compose -f docker-compose.server.yml ps
+
+Ver logs:
+
+docker compose -f docker-compose.server.yml logs -f
+
+Ver logs solo app:
+
+docker compose -f docker-compose.server.yml logs -f app
+
+Ver logs solo base de datos:
+
+docker compose -f docker-compose.server.yml logs -f db
+
+
+12. PROBAR DESDE LA VM
+----------------------
+
+En la VM:
+
+curl http://localhost:3000/api/health
+
+Respuesta esperada:
+
+{"ok":true}
+
+
+13. ABRIR PUERTO EN FIREWALL DE WINDOWS SERVER
+----------------------------------------------
+
+Si la VM usa red bridge con IP propia, abrir el puerto 3000 hacia la IP de la VM
+segun la politica de red de la organizacion.
+
+Si se requiere una regla local en Windows Server:
+
+New-NetFirewallRule -DisplayName "Sport Store POS 3000" -Direction Inbound -Protocol TCP -LocalPort 3000 -Action Allow
+
+Nota:
+Si la VM tiene IP propia en la red, puede que el firewall relevante sea el de la
+VM Linux o el firewall perimetral, no el del host Windows.
+
+En Ubuntu, si ufw esta activo:
+
+sudo ufw allow 3000/tcp
+sudo ufw status
+
+
+14. ACCEDER A LA APLICACION
+---------------------------
+
+Desde el navegador en la red:
+
+http://IP_DE_LA_VM:3000
+
+Ejemplo:
+
+http://192.168.1.60:3000
+
+Usuarios iniciales:
+
+admin / Admin123!
+supervisor / Supervisor123!
+cajero / Cajero123!
+inventario / Inventario123!
+
+
+15. OPERACION DIARIA
+--------------------
+
+Apagar:
+
+docker compose -f docker-compose.server.yml down
+
+Arrancar:
+
+docker compose -f docker-compose.server.yml up -d
+
+Reiniciar app:
+
+docker compose -f docker-compose.server.yml restart app
+
+Ver consumo:
+
+docker stats
+
+Ver volumenes:
+
+docker volume ls
+
+
+16. RESPALDO DE BASE DE DATOS
+-----------------------------
+
+Crear backup:
+
+docker compose -f docker-compose.server.yml exec db mariadb-dump -u root -p sport_store > sport_store_backup.sql
+
+Copiar el backup fuera de la VM:
+
+scp usuario@IP_DE_LA_VM:/home/usuario/sport-store-pos/paquete_despliegue/sport_store_backup.sql .
+
+Recomendacion:
+Guardar backups en una ruta externa al servidor o en un repositorio de respaldos.
+
+
+17. ACTUALIZAR A UNA NUEVA VERSION
+----------------------------------
+
+En la maquina de desarrollo:
+
+docker compose build app
+docker save -o sport-store-pos-app_1.0.tar sport-store-pos-app:1.0
+
+Copiar el nuevo TAR a la VM.
+
+En la VM:
+
+docker compose -f docker-compose.server.yml down
+docker load -i sport-store-pos-app_1.0.tar
+docker compose -f docker-compose.server.yml up -d
+
+La base de datos se conserva en el volumen Docker mariadb_data.
+
+
+18. LIMPIEZA CON CUIDADO
+------------------------
+
+NO ejecutar este comando en produccion salvo que se quiera borrar la base:
+
+docker compose -f docker-compose.server.yml down -v
+
+El parametro -v elimina volumenes, incluyendo mariadb_data.
+
+
+19. FUENTES OFICIALES CONSULTADAS
+---------------------------------
+
+Docker Desktop no soportado en Windows Server:
+https://docs.docker.com/desktop/troubleshoot-and-support/faqs/windowsfaqs/
+
+Instalacion de Docker Desktop y nota sobre Windows Server:
+https://docs.docker.com/installation/windows/
+
+Docker Engine en Ubuntu:
+https://docs.docker.com/engine/install/ubuntu/
+
+Docker save:
+https://docs.docker.com/reference/cli/docker/image/save/
+
+Docker load:
+https://docs.docker.com/reference/cli/docker/image/load/
+
+Docker Compose up:
+https://docs.docker.com/reference/cli/docker/compose/up/
+

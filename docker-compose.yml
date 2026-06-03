@@ -1,0 +1,47 @@
+services:
+  db:
+    image: mariadb:11.4
+    container_name: sport_store_db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-root_password_dev}
+      MARIADB_DATABASE: ${DB_NAME:-sport_store}
+      MARIADB_USER: ${DB_USER:-sport_user}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-sport_password_dev}
+      TZ: ${TZ:-America/Bogota}
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: sport-store-pos-app:1.0
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: sport_store_app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-sport_store}
+      DB_USER: ${DB_USER:-sport_user}
+      DB_PASSWORD: ${DB_PASSWORD:-sport_password_dev}
+      JWT_SECRET: ${JWT_SECRET:-change_this_secret_before_production}
+      TZ: ${TZ:-America/Bogota}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mariadb_data:

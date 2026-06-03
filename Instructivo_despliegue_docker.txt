@@ -1,0 +1,289 @@
+INSTRUCTIVO PARA COMPRIMIR Y DESPLEGAR SPORT STORE POS EN OTRA MAQUINA
+======================================================================
+
+Ubicacion actual del proyecto:
+C:\Users\jjimenezg\OneDrive - NUEVA EPS\Documentos\app
+
+Stack:
+- Frontend: Vue 3 + Vite
+- Backend: Node.js + Express
+- Base de datos: MariaDB
+- Contenedores: Docker Compose
+
+
+1. COMPRIMIR EL PROYECTO EN LA MAQUINA ACTUAL
+---------------------------------------------
+
+Abrir PowerShell y ejecutar:
+
+cd "C:\Users\jjimenezg\OneDrive - NUEVA EPS\Documentos"
+Compress-Archive -Path ".\app" -DestinationPath ".\sport-store-pos.zip" -Force
+
+Esto crea el archivo:
+C:\Users\jjimenezg\OneDrive - NUEVA EPS\Documentos\sport-store-pos.zip
+
+Copiar ese ZIP a la otra maquina por USB, red, OneDrive, carpeta compartida
+o el medio autorizado.
+
+
+2. REQUISITOS EN LA MAQUINA DESTINO
+-----------------------------------
+
+Instalar Docker:
+
+- En Windows: instalar Docker Desktop.
+- En Linux: instalar Docker Engine y Docker Compose.
+
+Verificar que Docker funciona:
+
+docker --version
+docker compose version
+
+
+3. DESCOMPRIMIR EN LA MAQUINA DESTINO
+-------------------------------------
+
+Ejemplo en Windows PowerShell:
+
+Expand-Archive -Path ".\sport-store-pos.zip" -DestinationPath "C:\apps" -Force
+cd "C:\apps\app"
+
+Ejemplo en Linux:
+
+sudo mkdir -p /opt/sport-store
+sudo unzip sport-store-pos.zip -d /opt/sport-store
+cd /opt/sport-store/app
+
+
+4. CREAR ARCHIVO .ENV
+---------------------
+
+En Windows PowerShell:
+
+Copy-Item .env.example .env
+
+En Linux:
+
+cp .env.example .env
+
+Editar el archivo .env y cambiar las claves:
+
+APP_PORT=3000
+DB_PORT=3306
+DB_NAME=sport_store
+DB_USER=sport_user
+DB_PASSWORD=pon_una_clave_segura
+MARIADB_ROOT_PASSWORD=pon_otra_clave_segura
+JWT_SECRET=pon_un_texto_largo_y_seguro
+TZ=America/Bogota
+
+IMPORTANTE:
+Hacer estos cambios antes del primer arranque, porque MariaDB crea la base
+de datos y el usuario al inicializar el volumen por primera vez.
+
+
+5. DESPLEGAR APP Y BASE DE DATOS CON DOCKER
+-------------------------------------------
+
+Desde la carpeta del proyecto, donde esta docker-compose.yml:
+
+docker compose up -d --build
+
+Este comando:
+- Descarga la imagen de MariaDB.
+- Instala dependencias del frontend Vue.
+- Compila el frontend Vue con Vite.
+- Instala dependencias del backend Node.js.
+- Crea el contenedor de la aplicacion.
+- Crea el contenedor de MariaDB.
+- Ejecuta el script inicial db/init/001_schema.sql.
+
+Contenedores creados:
+- sport_store_app: aplicacion web, API y frontend compilado.
+- sport_store_db: base de datos MariaDB.
+
+
+5B. CREAR IMAGEN Y LLEVARLA A UN SERVIDOR SOLO CON SISTEMA OPERATIVO
+--------------------------------------------------------------------
+
+Un contenedor no se puede ejecutar en un sistema operativo "puro" sin runtime.
+El servidor destino debe tener instalado como minimo:
+
+- Docker Engine
+- Docker Compose plugin
+
+La imagen de la aplicacion se puede construir en otra maquina y copiarla al
+servidor como archivo .tar.
+
+En la maquina donde esta el codigo y si tiene Docker:
+
+docker compose build app
+docker save -o sport-store-pos-app_1.0.tar sport-store-pos-app:1.0
+
+Tambien puede guardar la imagen de MariaDB para un servidor sin internet:
+
+docker pull mariadb:11.4
+docker save -o mariadb_11.4.tar mariadb:11.4
+
+Copiar al servidor estos archivos y carpetas:
+
+- sport-store-pos-app_1.0.tar
+- mariadb_11.4.tar, si el servidor no tiene internet
+- docker-compose.server.yml
+- .env.example
+- db/init/001_schema.sql
+
+En el servidor, crear una carpeta de despliegue:
+
+mkdir sport-store-pos
+cd sport-store-pos
+
+Crear esta estructura:
+
+sport-store-pos/
+  docker-compose.server.yml
+  .env.example
+  db/
+    init/
+      001_schema.sql
+
+Crear el archivo .env:
+
+cp .env.example .env
+
+Editar .env con las claves reales.
+
+Cargar las imagenes en el servidor:
+
+docker load -i sport-store-pos-app_1.0.tar
+docker load -i mariadb_11.4.tar
+
+Si el servidor tiene internet, no es obligatorio cargar mariadb_11.4.tar;
+Docker puede descargar mariadb:11.4 automaticamente.
+
+Ejecutar en el servidor:
+
+docker compose -f docker-compose.server.yml up -d
+
+Verificar:
+
+docker compose -f docker-compose.server.yml ps
+docker compose -f docker-compose.server.yml logs -f
+
+
+6. VERIFICAR EL DESPLIEGUE
+--------------------------
+
+Ver estado:
+
+docker compose ps
+
+Ver logs de la aplicacion:
+
+docker compose logs -f app
+
+Ver logs de la base de datos:
+
+docker compose logs -f db
+
+
+7. ABRIR LA APLICACION
+----------------------
+
+Desde la misma maquina:
+
+http://localhost:3000
+
+Desde otra maquina de la red:
+
+http://IP_DEL_SERVIDOR:3000
+
+Ejemplo:
+
+http://192.168.1.50:3000
+
+
+8. USUARIOS INICIALES
+---------------------
+
+Usuario: admin
+Contrasena: Admin123!
+Rol: admin
+
+Usuario: supervisor
+Contrasena: Supervisor123!
+Rol: supervisor
+
+Usuario: cajero
+Contrasena: Cajero123!
+Rol: cajero
+
+Usuario: inventario
+Contrasena: Inventario123!
+Rol: inventario
+
+
+9. COMANDOS UTILES
+------------------
+
+Apagar contenedores:
+
+docker compose down
+
+Arrancar nuevamente:
+
+docker compose up -d
+
+Reconstruir despues de cambios:
+
+docker compose up -d --build
+
+Ver todos los logs:
+
+docker compose logs -f
+
+Eliminar contenedores y base de datos:
+
+docker compose down -v
+
+ADVERTENCIA:
+docker compose down -v elimina el volumen mariadb_data, por lo tanto borra
+la base de datos.
+
+
+10. RESPALDO BASICO DE BASE DE DATOS
+------------------------------------
+
+Crear backup:
+
+docker compose exec db mariadb-dump -u root -p sport_store > sport_store_backup.sql
+
+Guardar el archivo sport_store_backup.sql en una ubicacion segura.
+
+
+11. ESTRUCTURA DEL PROYECTO
+---------------------------
+
+app/
+  docker-compose.yml
+  .env.example
+  README.md
+  frontend/
+    package.json
+    index.html
+    vite.config.js
+    src/
+      App.vue
+      main.js
+      styles.css
+  backend/
+    Dockerfile
+    package.json
+    src/
+      server.js
+      auth.js
+      db.js
+      config.js
+  db/
+    init/
+      001_schema.sql

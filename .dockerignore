@@ -1,0 +1,7 @@
+**/node_modules
+**/dist
+**/.vite
+*.log
+*.zip
+.env
+Instructivo_despliegue_Sport_Store_POS.docx

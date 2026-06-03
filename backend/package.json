@@ -1,0 +1,13 @@
+{
+  "name": "sport-store-pos",
+  "version": "1.0.0",
+  "description": "POS and inventory system for a sports clothing store.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "mysql2": "^3.10.2"
+  }
+}
