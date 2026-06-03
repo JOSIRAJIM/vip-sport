@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 
 const API = "/api";
 const moneyFormatter = new Intl.NumberFormat("es-CO", {
@@ -45,7 +45,12 @@ const report = ref(null);
 const users = ref([]);
 const receipt = ref(null);
 
+const productSearchInput = ref(null);
 const posSearch = ref("");
+const productSuggestions = ref([]);
+const productSuggestionsQuery = ref("");
+const productSuggestionIndex = ref(-1);
+const productSearchLoading = ref(false);
 const customerSearch = ref("");
 const cart = ref([]);
 const payments = ref([]);
@@ -96,6 +101,23 @@ const canCompleteSale = computed(() => currentShift.value && cart.value.length >
 const lowStockProducts = computed(() => products.value.filter((product) => product.low_stock).slice(0, 8));
 const canManageUsers = computed(() => user.value?.role === "admin");
 const canSeeSupervisorViews = computed(() => ["admin", "supervisor"].includes(user.value?.role));
+const selectedCustomer = computed(() => customers.value.find((item) => Number(item.id) === Number(selectedCustomerId.value)) || null);
+const selectedCustomerData = computed(() => {
+  const customer = selectedCustomer.value;
+  if (!customer) {
+    return { document: "", first_name: "", last_name: "" };
+  }
+  const nameParts = String(customer.full_name || "").trim().split(/\s+/).filter(Boolean);
+  return {
+    document: [customer.document_type, customer.document_number].filter(Boolean).join(" "),
+    first_name: nameParts[0] || "",
+    last_name: nameParts.slice(1).join(" ")
+  };
+});
+const cashDifferencePreview = computed(() => {
+  if (!currentShift.value) return 0;
+  return roundMoney(Number(closeShift.counted_cash || 0) - Number(currentShift.value.expected_cash || 0));
+});
 
 function today() {
   const date = new Date();
@@ -106,6 +128,8 @@ function today() {
 function emptyProduct() {
   return {
     sku: "",
+    reference: "",
+    barcode: "",
     name: "",
     category_id: "",
     category_name: "",
@@ -223,6 +247,10 @@ function logout(showMessage = true) {
   user.value = null;
   cart.value = [];
   payments.value = [];
+  selectedCustomerId.value = "";
+  selectedDiscountId.value = "";
+  customerName.value = "";
+  clearProductSearch();
   localStorage.removeItem("sportStoreToken");
   if (showMessage) {
     notify("Sesion cerrada.");
@@ -273,14 +301,12 @@ async function loadProducts(search = "", active = "") {
 }
 
 async function loadPos() {
-  const [productResult, methodResult, shiftResult, customerResult, discountResult] = await Promise.all([
-    api(`/products?search=${encodeURIComponent(posSearch.value)}`),
+  const [methodResult, shiftResult, customerResult, discountResult] = await Promise.all([
     api("/payment-methods"),
     api("/shifts/current"),
     api(`/customers?search=${encodeURIComponent(customerSearch.value)}`),
     api("/discounts?active=true")
   ]);
-  products.value = productResult.products;
   paymentMethods.value = methodResult.payment_methods;
   currentShift.value = shiftResult.shift;
   customers.value = customerResult.customers;
@@ -288,10 +314,107 @@ async function loadPos() {
   if (!payments.value.length && saleTotal.value > 0) {
     setSinglePaymentToTotal();
   }
+  focusProductSearch();
 }
 
 async function searchPos() {
-  await guarded(loadPos);
+  await guarded(async () => {
+    const result = await api(`/customers?search=${encodeURIComponent(customerSearch.value)}`);
+    customers.value = result.customers;
+  });
+}
+
+function focusProductSearch() {
+  nextTick(() => {
+    productSearchInput.value?.focus();
+  });
+}
+
+function clearProductSearch() {
+  window.clearTimeout(queueProductSuggestions.timer);
+  posSearch.value = "";
+  productSuggestions.value = [];
+  productSuggestionsQuery.value = "";
+  productSuggestionIndex.value = -1;
+}
+
+async function loadProductSuggestions(query = posSearch.value) {
+  const search = String(query || "").trim();
+  if (!search) {
+    clearProductSearch();
+    return;
+  }
+
+  productSearchLoading.value = true;
+  try {
+    const result = await api(`/products?search=${encodeURIComponent(search)}&limit=10`);
+    if (String(posSearch.value || "").trim() === search) {
+      productSuggestions.value = result.products.slice(0, 10);
+      productSuggestionsQuery.value = search;
+      productSuggestionIndex.value = productSuggestions.value.length ? 0 : -1;
+    }
+  } catch (error) {
+    notify(error.message, "error");
+  } finally {
+    productSearchLoading.value = false;
+  }
+}
+
+function queueProductSuggestions() {
+  window.clearTimeout(queueProductSuggestions.timer);
+  const search = String(posSearch.value || "").trim();
+  if (!search) {
+    clearProductSearch();
+    return;
+  }
+  productSuggestionIndex.value = -1;
+  queueProductSuggestions.timer = window.setTimeout(() => {
+    loadProductSuggestions(search);
+  }, 120);
+}
+
+function moveProductSuggestion(direction) {
+  const total = productSuggestions.value.length;
+  if (!total) return;
+  const current = productSuggestionIndex.value < 0 ? 0 : productSuggestionIndex.value;
+  productSuggestionIndex.value = (current + direction + total) % total;
+}
+
+function findExactProduct(search) {
+  const normalized = String(search || "").trim().toLowerCase();
+  return productSuggestions.value.find((product) => (
+    String(product.barcode || "").toLowerCase() === normalized ||
+    String(product.sku || "").toLowerCase() === normalized ||
+    String(product.reference || "").toLowerCase() === normalized
+  ));
+}
+
+function addProductFromSearch(product) {
+  if (!product) return;
+  if (Number(product.stock) <= 0) {
+    notify("Producto sin stock disponible.", "error");
+    focusProductSearch();
+    return;
+  }
+  addToCart(product);
+  clearProductSearch();
+  focusProductSearch();
+}
+
+async function confirmProductSearch() {
+  const search = String(posSearch.value || "").trim();
+  if (!search) return;
+  if (!productSuggestions.value.length || productSuggestionsQuery.value !== search) {
+    await loadProductSuggestions(search);
+  }
+  const selected = productSuggestions.value[productSuggestionIndex.value];
+  const product = selected || findExactProduct(search) || productSuggestions.value[0];
+  if (!product) {
+    notify("No se encontro producto para agregar.", "error");
+    focusProductSearch();
+    return;
+  }
+  addProductFromSearch(product);
 }
 
 function addToCart(product) {
@@ -352,9 +475,21 @@ async function openShiftFromPos() {
   });
 }
 
+function resetSaleState() {
+  cart.value = [];
+  payments.value = [];
+  customerName.value = "";
+  selectedCustomerId.value = "";
+  selectedDiscountId.value = "";
+  receipt.value = null;
+  clearProductSearch();
+}
+
 async function completeSale() {
   if (!canCompleteSale.value) return;
-  await guarded(async () => {
+  const receiptWindow = window.open("", "sportStoreReceipt", "width=420,height=720");
+  loading.value = true;
+  try {
     const result = await api("/sales", {
       method: "POST",
       body: {
@@ -370,19 +505,110 @@ async function completeSale() {
         }))
       }
     });
-    cart.value = [];
-    payments.value = [];
-    customerName.value = "";
-    selectedCustomerId.value = "";
-    selectedDiscountId.value = "";
-    receipt.value = result.sale;
+    resetSaleState();
+    openReceiptPopup(result.sale, receiptWindow);
     notify("Venta registrada.");
     await loadPos();
-  });
+  } catch (error) {
+    if (receiptWindow && !receiptWindow.closed) {
+      receiptWindow.close();
+    }
+    notify(error.message, "error");
+  } finally {
+    loading.value = false;
+    focusProductSearch();
+  }
 }
 
 function printReceipt() {
   window.print();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function buildReceiptHtml(sale) {
+  const itemRows = sale.items.map((item) => `
+    <div class="item">
+      <strong>${escapeHtml(item.name)}</strong>
+      <div class="row"><span>${escapeHtml(item.quantity)} x ${escapeHtml(formatMoney(item.unit_price))}</span><span>${escapeHtml(formatMoney(item.total))}</span></div>
+      <small>${escapeHtml(item.sku)} ${escapeHtml(item.size || "")} ${escapeHtml(item.color || "")}</small>
+    </div>
+  `).join("");
+  const paymentRows = sale.payments.map((payment) => `
+    <div class="row">
+      <span>${escapeHtml(payment.name)} ${payment.reference ? `(${escapeHtml(payment.reference)})` : ""}</span>
+      <span>${escapeHtml(formatMoney(payment.amount))}</span>
+    </div>
+  `).join("");
+  const customer = sale.customer?.full_name || sale.customer_name || "";
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Tirilla ${escapeHtml(sale.receipt_number)}</title>
+  <style>
+    body { margin: 0; background: #f4f6f5; color: #111; font-family: Arial, sans-serif; }
+    .toolbar { display: flex; gap: 8px; padding: 12px; background: #fff; border-bottom: 1px solid #d9e2df; position: sticky; top: 0; }
+    button { min-height: 36px; border: 0; border-radius: 6px; padding: 0 12px; background: #0f766e; color: #fff; font-weight: 700; cursor: pointer; }
+    .receipt { width: 310px; margin: 16px auto; padding: 18px; background: #fff; font-family: Consolas, "Courier New", monospace; font-size: 12px; box-shadow: 0 12px 30px rgba(0,0,0,.12); }
+    h3 { text-align: center; font-size: 15px; margin: 0 0 8px; }
+    .line { border-top: 1px dashed #333; margin: 8px 0; }
+    .row { display: flex; justify-content: space-between; gap: 8px; }
+    .item { margin-bottom: 6px; }
+    .center { text-align: center; }
+    @media print {
+      body { background: #fff; }
+      .toolbar { display: none; }
+      .receipt { margin: 0; box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar"><button type="button" onclick="window.print()">Imprimir</button></div>
+  <main class="receipt">
+    <h3>SPORT STORE</h3>
+    <div class="row"><span>Tirilla</span><span>${escapeHtml(sale.receipt_number)}</span></div>
+    <div class="row"><span>Fecha</span><span>${escapeHtml(new Date(sale.created_at).toLocaleString())}</span></div>
+    <div class="row"><span>Cajero</span><span>${escapeHtml(sale.cashier_name)}</span></div>
+    ${customer ? `<div class="row"><span>Cliente</span><span>${escapeHtml(customer)}</span></div>` : ""}
+    <div class="line"></div>
+    ${itemRows}
+    <div class="line"></div>
+    <div class="row"><span>Subtotal</span><span>${escapeHtml(formatMoney(sale.subtotal))}</span></div>
+    ${sale.discount_total > 0 ? `<div class="row"><span>Descuento</span><span>-${escapeHtml(formatMoney(sale.discount_total))}</span></div>` : ""}
+    ${sale.tax_total > 0 ? `<div class="row"><span>Impuestos</span><span>${escapeHtml(formatMoney(sale.tax_total))}</span></div>` : ""}
+    <div class="row"><strong>Total</strong><strong>${escapeHtml(formatMoney(sale.total))}</strong></div>
+    <div class="line"></div>
+    ${paymentRows}
+    <div class="line"></div>
+    <p class="center">Gracias por su compra</p>
+  </main>
+</body>
+</html>`;
+}
+
+function openReceiptPopup(sale, receiptWindow) {
+  const target = receiptWindow && !receiptWindow.closed
+    ? receiptWindow
+    : window.open("", "sportStoreReceipt", "width=420,height=720");
+
+  if (!target) {
+    receipt.value = sale;
+    return;
+  }
+
+  target.document.open();
+  target.document.write(buildReceiptHtml(sale));
+  target.document.close();
+  target.focus();
 }
 
 async function loadInventory() {
@@ -403,6 +629,8 @@ function editProduct(product) {
   editingProductId.value = product.id;
   Object.assign(productForm, {
     sku: product.sku || "",
+    reference: product.reference || "",
+    barcode: product.barcode || "",
     name: product.name || "",
     category_id: product.category_id || "",
     category_name: "",
@@ -425,6 +653,8 @@ async function saveProduct() {
   await guarded(async () => {
     const body = {
       sku: productForm.sku,
+      reference: productForm.reference || null,
+      barcode: productForm.barcode || null,
       name: productForm.name,
       category_id: productForm.category_id || null,
       category_name: productForm.category_name || null,
@@ -704,6 +934,10 @@ async function updateUser(userId) {
   });
 }
 
+watch(selectedCustomer, (customer) => {
+  customerName.value = customer?.full_name || "";
+});
+
 onMounted(async () => {
   if (!token.value) return;
   await guarded(async () => {
@@ -832,68 +1066,81 @@ onMounted(async () => {
         </template>
 
         <template v-else-if="activeView === 'pos'">
-          <section class="grid two">
-            <div class="grid">
-              <section v-if="currentShift" class="panel">
-                <div class="panel-body actions">
-                  <span class="status-pill">Turno #{{ currentShift.id }} abierto</span>
-                  <span class="muted">Base {{ formatMoney(currentShift.opening_cash) }}</span>
-                  <span class="muted">Efectivo esperado {{ formatMoney(currentShift.expected_cash) }}</span>
+          <section class="pos-layout">
+            <section class="panel pos-sale-panel">
+              <div class="panel-header pos-sale-header">
+                <div>
+                  <h3>Venta</h3>
+                  <p v-if="currentShift" class="muted">Turno #{{ currentShift.id }} abierto por {{ currentShift.opened_by_name }}</p>
+                  <p v-else class="muted">Abre un turno para empezar a vender.</p>
                 </div>
-              </section>
-              <section v-else class="panel">
-                <div class="panel-header"><h3>Abrir turno</h3></div>
-                <div class="panel-body">
-                  <form class="toolbar" @submit.prevent="openShiftFromPos">
-                    <label>Base de caja
-                      <input v-model.number="openingCash" type="number" min="0" step="100" required>
-                    </label>
-                    <button class="primary" type="submit">Abrir</button>
-                  </form>
+                <div class="pos-sale-total">
+                  <span class="muted">Total</span>
+                  <strong>{{ formatMoney(saleTotal) }}</strong>
+                  <span class="status-pill" :class="{ warn: balance !== 0 }">{{ formatMoney(balance) }} saldo</span>
                 </div>
-              </section>
-
-              <section class="panel">
-                <div class="panel-header">
-                  <h3>Productos</h3>
-                  <form class="actions" @submit.prevent="searchPos">
-                    <input v-model.trim="posSearch" placeholder="SKU, producto o categoria">
-                    <button class="ghost" type="submit">Buscar</button>
-                  </form>
-                </div>
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr><th>SKU</th><th>Producto</th><th>Talla</th><th>Color</th><th>Precio</th><th>Stock</th><th></th></tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="product in products" :key="product.id">
-                        <td>{{ product.sku }}</td>
-                        <td>{{ product.name }}</td>
-                        <td>{{ product.size || "-" }}</td>
-                        <td>{{ product.color || "-" }}</td>
-                        <td>{{ formatMoney(product.price) }}</td>
-                        <td>{{ product.stock }}</td>
-                        <td><button class="primary mini" type="button" :disabled="product.stock <= 0" @click="addToCart(product)">Agregar</button></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            </div>
-
-            <section class="panel">
-              <div class="panel-header">
-                <h3>Venta</h3>
-                <span class="status-pill" :class="{ warn: balance !== 0 }">{{ formatMoney(balance) }} saldo</span>
               </div>
-              <div class="panel-body">
-                <div class="cart-list">
+
+              <div class="panel-body pos-sale-body">
+                <form v-if="!currentShift" class="toolbar shift-open-inline" @submit.prevent="openShiftFromPos">
+                  <label>Base de caja
+                    <input v-model.number="openingCash" type="number" min="0" step="100" required>
+                  </label>
+                  <button class="primary" type="submit">Abrir turno</button>
+                </form>
+                <div v-else class="shift-strip">
+                  <span>Base {{ formatMoney(currentShift.opening_cash) }}</span>
+                  <span>Total vendido {{ formatMoney(currentShift.total_sales || 0) }}</span>
+                  <span>{{ currentShift.sales_count || 0 }} ventas</span>
+                  <span>Efectivo esperado {{ formatMoney(currentShift.expected_cash) }}</span>
+                </div>
+
+                <div class="pos-search-box">
+                  <label>Buscar producto
+                    <input
+                      ref="productSearchInput"
+                      v-model.trim="posSearch"
+                      autocomplete="off"
+                      placeholder="Codigo de barras, SKU, referencia o producto"
+                      @input="queueProductSuggestions"
+                      @focus="queueProductSuggestions"
+                      @keydown.down.prevent="moveProductSuggestion(1)"
+                      @keydown.up.prevent="moveProductSuggestion(-1)"
+                      @keydown.enter.prevent="confirmProductSearch"
+                      @keydown.esc.prevent="clearProductSearch"
+                    >
+                  </label>
+                  <div v-if="posSearch" class="suggestion-panel" role="listbox">
+                    <p v-if="productSearchLoading" class="muted">Buscando...</p>
+                    <button
+                      v-for="(product, index) in productSuggestions"
+                      :key="product.id"
+                      type="button"
+                      class="suggestion-item"
+                      :class="{ active: index === productSuggestionIndex, disabled: product.stock <= 0 }"
+                      :disabled="product.stock <= 0"
+                      role="option"
+                      @mousedown.prevent="addProductFromSearch(product)"
+                    >
+                      <span>
+                        <strong>{{ product.name }}</strong>
+                        <small>{{ product.sku }} <template v-if="product.reference">/ Ref. {{ product.reference }}</template> <template v-if="product.barcode">/ {{ product.barcode }}</template></small>
+                      </span>
+                      <span>
+                        <strong>{{ formatMoney(product.price) }}</strong>
+                        <small>Stock {{ product.stock }}</small>
+                      </span>
+                    </button>
+                    <p v-if="!productSearchLoading && productSuggestionsQuery === posSearch && !productSuggestions.length" class="muted">Sin resultados.</p>
+                  </div>
+                </div>
+
+                <div class="cart-list pos-cart-list">
                   <p v-if="!cart.length" class="muted">Carrito vacio.</p>
                   <div v-for="(item, index) in cart" :key="item.product.id" class="cart-item">
                     <div>
                       <strong>{{ item.product.name }}</strong>
-                      <p class="muted">{{ item.product.sku }} {{ item.product.size || "" }} {{ item.product.color || "" }}</p>
+                      <p class="muted">{{ item.product.sku }} <template v-if="item.product.reference">/ {{ item.product.reference }}</template> {{ item.product.size || "" }} {{ item.product.color || "" }}</p>
                       <p>{{ formatMoney(item.product.price) }} x {{ item.quantity }}</p>
                     </div>
                     <div class="quantity-controls">
@@ -905,30 +1152,49 @@ onMounted(async () => {
                   </div>
                 </div>
 
-                <div class="summary-lines">
+                <div class="summary-lines pos-summary">
                   <div><span>Subtotal</span><span>{{ formatMoney(cartTotal) }}</span></div>
                   <div v-if="discountTotal > 0"><span>Descuento</span><span>-{{ formatMoney(discountTotal) }}</span></div>
                   <div v-if="taxTotal > 0"><span>Impuestos</span><span>{{ formatMoney(taxTotal) }}</span></div>
                 </div>
-                <div class="total-line"><span>Total</span><span>{{ formatMoney(saleTotal) }}</span></div>
+              </div>
+            </section>
 
-                <div class="grid form-space">
-                  <div class="form-grid compact">
+            <section class="grid two pos-checkout-grid">
+              <section class="panel">
+                <div class="panel-header"><h3>Cliente</h3></div>
+                <div class="panel-body grid">
+                  <form class="toolbar" @submit.prevent="searchPos">
                     <label>Buscar cliente
-                      <input v-model.trim="customerSearch" placeholder="Documento, nombre o telefono" @change="searchPos">
+                      <input v-model.trim="customerSearch" placeholder="Documento, nombre o telefono">
                     </label>
-                    <label>Cliente registrado
-                      <select v-model="selectedCustomerId">
-                        <option value="">Sin cliente registrado</option>
-                        <option v-for="customer in customers" :key="customer.id" :value="customer.id">
-                          {{ customer.full_name }} {{ customer.document_number ? `- ${customer.document_number}` : "" }}
-                        </option>
-                      </select>
+                    <button class="ghost" type="submit">Buscar</button>
+                  </form>
+                  <label>Cliente registrado
+                    <select v-model="selectedCustomerId">
+                      <option value="">Sin cliente registrado</option>
+                      <option v-for="customer in customers" :key="customer.id" :value="customer.id">
+                        {{ customer.full_name }} {{ customer.document_number ? `- ${customer.document_number}` : "" }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="form-grid compact readonly-customer">
+                    <label>Documento
+                      <input :value="selectedCustomerData.document" readonly>
                     </label>
-                    <label>Cliente mostrador
-                      <input v-model.trim="customerName" placeholder="Opcional">
+                    <label>Nombre
+                      <input :value="selectedCustomerData.first_name" readonly>
+                    </label>
+                    <label>Apellido
+                      <input :value="selectedCustomerData.last_name" readonly>
                     </label>
                   </div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-header"><h3>Pago</h3></div>
+                <div class="panel-body grid">
                   <label>Descuento
                     <select v-model="selectedDiscountId" @change="setSinglePaymentToTotal">
                       <option value="">Sin descuento</option>
@@ -961,9 +1227,13 @@ onMounted(async () => {
                     <button class="ghost" type="button" @click="addPayment">Agregar pago</button>
                     <button class="ghost" type="button" @click="setSinglePaymentToTotal">Igualar total</button>
                   </div>
-                  <button class="primary full" type="button" :disabled="!canCompleteSale" @click="completeSale">Finalizar venta</button>
+                  <div class="summary-lines">
+                    <div><span>Pagado</span><span>{{ formatMoney(paidTotal) }}</span></div>
+                    <div><span>Saldo</span><span>{{ formatMoney(balance) }}</span></div>
+                  </div>
+                  <button class="primary full" type="button" :disabled="!canCompleteSale || loading" @click="completeSale">Finalizar venta</button>
                 </div>
-              </div>
+              </section>
             </section>
           </section>
         </template>
@@ -977,6 +1247,8 @@ onMounted(async () => {
             <div class="panel-body">
               <form class="form-grid" @submit.prevent="saveProduct">
                 <label>SKU<input v-model.trim="productForm.sku" required></label>
+                <label>Referencia<input v-model.trim="productForm.reference"></label>
+                <label>Codigo de barras<input v-model.trim="productForm.barcode"></label>
                 <label class="span-2">Producto<input v-model.trim="productForm.name" required></label>
                 <label>Categoria
                   <select v-model="productForm.category_id">
@@ -1007,11 +1279,12 @@ onMounted(async () => {
             <div class="table-wrap">
               <table>
                 <thead>
-                  <tr><th>SKU</th><th>Producto</th><th>Categoria</th><th>Precio</th><th>Stock</th><th>Ajuste</th><th></th></tr>
+                  <tr><th>SKU</th><th>Referencia</th><th>Producto</th><th>Categoria</th><th>Precio</th><th>Stock</th><th>Ajuste</th><th></th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="product in products" :key="product.id">
                     <td>{{ product.sku }}</td>
+                    <td>{{ product.reference || "-" }}<br><span class="muted">{{ product.barcode || "" }}</span></td>
                     <td>{{ product.name }}<br><span class="muted">{{ product.size || "-" }} / {{ product.color || "-" }}</span></td>
                     <td>{{ product.category_name || "-" }}</td>
                     <td>{{ formatMoney(product.price) }}</td>
@@ -1370,9 +1643,23 @@ onMounted(async () => {
               <div class="panel-body">
                 <form v-if="currentShift" class="grid" @submit.prevent="closeCurrentShift">
                   <p><span class="status-pill">Abierto</span> <span class="muted">por {{ currentShift.opened_by_name }}</span></p>
+                  <div class="closure-summary">
+                    <div class="total-line"><span>Base inicial</span><span>{{ formatMoney(currentShift.opening_cash) }}</span></div>
+                    <div class="total-line"><span>Total vendido</span><span>{{ formatMoney(currentShift.total_sales || 0) }}</span></div>
+                    <div class="total-line"><span>Cantidad de ventas</span><span>{{ currentShift.sales_count || 0 }}</span></div>
+                    <div class="payment-breakdown">
+                      <div v-if="!currentShift.payments?.length" class="muted">Sin pagos registrados.</div>
+                      <div v-for="payment in currentShift.payments || []" :key="payment.code">
+                        <span>{{ payment.name }}</span>
+                        <span>{{ formatMoney(payment.total) }}</span>
+                      </div>
+                    </div>
+                    <div class="total-line"><span>Efectivo esperado</span><span>{{ formatMoney(currentShift.expected_cash) }}</span></div>
+                  </div>
                   <label>Efectivo contado
                     <input v-model.number="closeShift.counted_cash" type="number" min="0" step="100" required>
                   </label>
+                  <div class="total-line"><span>Diferencia de caja</span><span>{{ formatMoney(cashDifferencePreview) }}</span></div>
                   <label>Notas
                     <textarea v-model.trim="closeShift.notes" rows="3"></textarea>
                   </label>
@@ -1392,9 +1679,15 @@ onMounted(async () => {
               <div class="panel-body">
                 <template v-if="currentShift">
                   <p class="muted">Turno #{{ currentShift.id }}</p>
-                  <div class="total-line"><span>Base</span><span>{{ formatMoney(currentShift.opening_cash) }}</span></div>
-                  <div class="total-line"><span>Ventas efectivo</span><span>{{ formatMoney(currentShift.cash_sales) }}</span></div>
-                  <div class="total-line"><span>Esperado</span><span>{{ formatMoney(currentShift.expected_cash) }}</span></div>
+                  <div class="total-line"><span>Base inicial</span><span>{{ formatMoney(currentShift.opening_cash) }}</span></div>
+                  <div class="total-line"><span>Total vendido</span><span>{{ formatMoney(currentShift.total_sales || 0) }}</span></div>
+                  <div class="total-line"><span>Cantidad de ventas</span><span>{{ currentShift.sales_count || 0 }}</span></div>
+                  <div class="summary-lines">
+                    <div v-for="payment in currentShift.payments || []" :key="payment.code">
+                      <span>{{ payment.name }}</span><span>{{ formatMoney(payment.total) }}</span>
+                    </div>
+                  </div>
+                  <div class="total-line"><span>Efectivo esperado</span><span>{{ formatMoney(currentShift.expected_cash) }}</span></div>
                 </template>
                 <p v-else class="muted">No hay turno abierto.</p>
               </div>
@@ -1411,14 +1704,16 @@ onMounted(async () => {
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>#</th><th>Cajero</th><th>Estado</th><th>Base</th><th>Esperado</th><th>Contado</th><th>Diferencia</th></tr></thead>
+                <thead><tr><th>#</th><th>Cajero</th><th>Estado</th><th>Base</th><th>Total vendido</th><th>Ventas</th><th>Esperado</th><th>Contado</th><th>Diferencia</th></tr></thead>
                 <tbody>
-                  <tr v-if="!shifts.length"><td colspan="7" class="muted">Sin turnos.</td></tr>
+                  <tr v-if="!shifts.length"><td colspan="9" class="muted">Sin turnos.</td></tr>
                   <tr v-for="shift in shifts" :key="shift.id">
                     <td>{{ shift.id }}</td>
                     <td>{{ shift.opened_by_name }}</td>
                     <td><span class="status-pill" :class="{ warn: shift.status !== 'CLOSED' }">{{ shift.status }}</span></td>
                     <td>{{ formatMoney(shift.opening_cash) }}</td>
+                    <td>{{ formatMoney(shift.total_sales || 0) }}</td>
+                    <td>{{ shift.sales_count || 0 }}</td>
                     <td>{{ formatMoney(shift.expected_cash) }}</td>
                     <td>{{ shift.counted_cash == null ? "-" : formatMoney(shift.counted_cash) }}</td>
                     <td>{{ shift.difference == null ? "-" : formatMoney(shift.difference) }}</td>

@@ -169,6 +169,35 @@ async function getCashSalesTotal(db, shiftId) {
   return toMoney(rows[0].total || 0);
 }
 
+async function getShiftSalesSummary(db, shiftId) {
+  const [salesRows] = await db.query(
+    `SELECT COUNT(*) AS sales_count, COALESCE(SUM(total), 0) AS total_sales
+     FROM sales
+     WHERE shift_id = ? AND status = 'COMPLETED'`,
+    [shiftId]
+  );
+  const [paymentRows] = await db.query(
+    `SELECT pm.code, pm.name, COALESCE(SUM(sp.amount), 0) AS total, COUNT(*) AS payments
+     FROM sale_payments sp
+     JOIN payment_methods pm ON pm.id = sp.payment_method_id
+     JOIN sales s ON s.id = sp.sale_id
+     WHERE s.shift_id = ? AND s.status = 'COMPLETED'
+     GROUP BY pm.id, pm.code, pm.name
+     ORDER BY total DESC, pm.name`,
+    [shiftId]
+  );
+
+  return {
+    sales_count: Number(salesRows[0].sales_count || 0),
+    total_sales: toMoney(salesRows[0].total_sales || 0),
+    payments: paymentRows.map((row) => ({
+      ...row,
+      total: toMoney(row.total),
+      payments: Number(row.payments || 0)
+    }))
+  };
+}
+
 async function fetchShiftSummary(db, shiftId) {
   const [rows] = await db.query(
     `SELECT s.*, opener.full_name AS opened_by_name, closer.full_name AS closed_by_name
@@ -183,12 +212,17 @@ async function fetchShiftSummary(db, shiftId) {
     return null;
   }
 
-  const cashSales = await getCashSalesTotal(db, shiftId);
-  const expectedCash = rows[0].status === "OPEN" ? toMoney(rows[0].opening_cash + cashSales) : rows[0].expected_cash;
+  const salesSummary = await getShiftSalesSummary(db, shiftId);
+  const cashPayment = salesSummary.payments.find((payment) => payment.code === "cash");
+  const cashSales = cashPayment ? cashPayment.total : 0;
+  const expectedCash = rows[0].status === "OPEN" ? toMoney(Number(rows[0].opening_cash) + cashSales) : rows[0].expected_cash;
 
   return {
     ...rows[0],
     opening_cash: toMoney(rows[0].opening_cash),
+    total_sales: salesSummary.total_sales,
+    sales_count: salesSummary.sales_count,
+    payments: salesSummary.payments,
     cash_sales: cashSales,
     expected_cash: toMoney(expectedCash || 0),
     counted_cash: rows[0].counted_cash == null ? null : toMoney(rows[0].counted_cash),
@@ -607,7 +641,7 @@ app.get("/api/credit-notes", authRequired, requireRoles("supervisor", "cajero"),
 
 app.get("/api/products", authRequired, asyncHandler(async (req, res) => {
   const params = [];
-  let sql = `SELECT p.id, p.sku, p.name, p.category_id, c.name AS category_name, p.size, p.color,
+  let sql = `SELECT p.id, p.sku, p.reference, p.barcode, p.name, p.category_id, c.name AS category_name, p.size, p.color,
                     p.cost, p.price, p.stock, p.min_stock, p.is_active, p.created_at, p.updated_at
              FROM products p
              LEFT JOIN categories c ON c.id = p.category_id
@@ -619,11 +653,30 @@ app.get("/api/products", authRequired, asyncHandler(async (req, res) => {
 
   const search = String(req.query.search || "").trim();
   if (search) {
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
-    sql += " AND (p.sku LIKE ? OR p.name LIKE ? OR c.name LIKE ?)";
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    sql += " AND (p.sku LIKE ? OR p.reference LIKE ? OR p.barcode LIKE ? OR p.name LIKE ? OR c.name LIKE ?)";
   }
 
-  sql += " ORDER BY p.name, p.size, p.color LIMIT 300";
+  if (search) {
+    params.push(search, search, search, `${search}%`, `${search}%`, `${search}%`, `%${search}%`);
+    sql += ` ORDER BY
+      CASE
+        WHEN p.barcode = ? THEN 0
+        WHEN p.sku = ? THEN 1
+        WHEN p.reference = ? THEN 2
+        WHEN p.barcode LIKE ? OR p.sku LIKE ? OR p.reference LIKE ? THEN 3
+        WHEN p.name LIKE ? THEN 4
+        ELSE 5
+      END,
+      p.name, p.size, p.color`;
+  } else {
+    sql += " ORDER BY p.name, p.size, p.color";
+  }
+
+  const requestedLimit = Number(req.query.limit || 300);
+  const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 300) : 300;
+  params.push(limit);
+  sql += " LIMIT ?";
 
   const [rows] = await pool.query(sql, params);
   res.json({
@@ -639,6 +692,8 @@ app.get("/api/products", authRequired, asyncHandler(async (req, res) => {
 
 app.post("/api/products", authRequired, requireRoles("supervisor", "inventario"), asyncHandler(async (req, res) => {
   const sku = String(req.body.sku || "").trim();
+  const reference = nullableText(req.body.reference);
+  const barcode = nullableText(req.body.barcode);
   const name = String(req.body.name || "").trim();
   const price = toNonNegativeMoney(req.body.price, "Precio");
   const cost = toNonNegativeMoney(req.body.cost || 0, "Costo");
@@ -655,10 +710,12 @@ app.post("/api/products", authRequired, requireRoles("supervisor", "inventario")
   const product = await withTransaction(async (connection) => {
     const categoryId = await resolveCategoryId(connection, req.body.category_id, req.body.category_name);
     const [result] = await connection.query(
-      `INSERT INTO products (sku, name, category_id, size, color, cost, price, stock, min_stock)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO products (sku, reference, barcode, name, category_id, size, color, cost, price, stock, min_stock)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sku,
+        reference,
+        barcode,
         name,
         categoryId,
         nullableText(req.body.size),
@@ -695,6 +752,8 @@ app.post("/api/products", authRequired, requireRoles("supervisor", "inventario")
 app.put("/api/products/:id", authRequired, requireRoles("supervisor", "inventario"), asyncHandler(async (req, res) => {
   const productId = toPositiveInt(req.params.id, "Producto");
   const sku = String(req.body.sku || "").trim();
+  const reference = nullableText(req.body.reference);
+  const barcode = nullableText(req.body.barcode);
   const name = String(req.body.name || "").trim();
   const price = toNonNegativeMoney(req.body.price, "Precio");
   const cost = toNonNegativeMoney(req.body.cost || 0, "Costo");
@@ -716,11 +775,13 @@ app.put("/api/products/:id", authRequired, requireRoles("supervisor", "inventari
     const categoryId = await resolveCategoryId(connection, req.body.category_id, req.body.category_name);
     await connection.query(
       `UPDATE products
-       SET sku = ?, name = ?, category_id = ?, size = ?, color = ?, cost = ?, price = ?,
+       SET sku = ?, reference = ?, barcode = ?, name = ?, category_id = ?, size = ?, color = ?, cost = ?, price = ?,
            min_stock = ?, is_active = ?
        WHERE id = ?`,
       [
         sku,
+        reference,
+        barcode,
         name,
         categoryId,
         nullableText(req.body.size),
