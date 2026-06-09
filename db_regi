@@ -1,0 +1,325 @@
+# MANUAL DE ADMINISTRACIÓN DE USUARIOS Y PERMISOS EN MARIADB
+
+Versión: MariaDB 11.x
+Base de ejemplo: sport_store
+
+---
+
+1. ACCEDER A MARIADB
+
+---
+
+Desde Docker:
+
+docker exec -it sport_store_db mariadb -u root -p
+
+Ingresar la contraseña del usuario root.
+
+---
+
+2. VER USUARIOS EXISTENTES
+
+---
+
+Consultar todos los usuarios:
+
+SELECT User, Host
+FROM mysql.user
+ORDER BY User;
+
+Consultar privilegios de un usuario:
+
+SHOW GRANTS FOR 'consultadb'@'%';
+
+---
+
+3. CREAR UN USUARIO SIN PERMISOS
+
+---
+
+Crear usuario:
+
+CREATE USER 'usuario_prueba'@'%' IDENTIFIED BY 'Password123!';
+
+Ver permisos:
+
+SHOW GRANTS FOR 'usuario_prueba'@'%';
+
+Resultado esperado:
+
+GRANT USAGE ON *.* TO 'usuario_prueba'@'%';
+
+Explicación:
+
+USAGE significa que el usuario existe y puede autenticarse,
+pero no tiene permisos sobre ninguna base de datos.
+
+---
+
+4. CREAR USUARIO SOLO LECTURA (SELECT)
+
+---
+
+Crear usuario:
+
+CREATE USER 'consultadb'@'%' IDENTIFIED BY 'Password123!';
+
+Otorgar permiso de lectura:
+
+GRANT SELECT
+ON sport_store.* TO 'consultadb'@'%';
+
+Verificar:
+
+SHOW GRANTS FOR 'consultadb'@'%';
+
+Resultado:
+
+GRANT USAGE ON *.* TO 'consultadb'@'%';
+GRANT SELECT ON sport_store.* TO 'consultadb'@'%';
+
+Puede:
+
+* SELECT
+* JOIN
+* Consultas complejas
+* Reportes
+
+No puede:
+
+* INSERT
+* UPDATE
+* DELETE
+* CREATE
+* ALTER
+* DROP
+
+---
+
+5. CREAR USUARIO CON PERMISOS DE LECTURA Y ESCRITURA
+
+---
+
+Crear usuario:
+
+CREATE USER 'operador'@'%' IDENTIFIED BY 'Password123!';
+
+Otorgar permisos:
+
+GRANT SELECT,
+INSERT,
+UPDATE,
+DELETE
+ON sport_store.* TO 'operador'@'%';
+
+Verificar:
+
+SHOW GRANTS FOR 'operador'@'%';
+
+Puede:
+
+* Consultar
+* Insertar registros
+* Modificar registros
+* Eliminar registros
+
+No puede:
+
+* Crear tablas
+* Alterar estructuras
+* Crear usuarios
+
+---
+
+6. CREAR USUARIO PARA ADMINISTRAR TABLAS
+
+---
+
+Crear usuario:
+
+CREATE USER 'desarrollador'@'%' IDENTIFIED BY 'Password123!';
+
+Otorgar permisos:
+
+GRANT SELECT,
+INSERT,
+UPDATE,
+DELETE,
+CREATE,
+ALTER,
+DROP,
+INDEX
+ON sport_store.* TO 'desarrollador'@'%';
+
+Puede:
+
+* Crear tablas
+* Modificar tablas
+* Eliminar tablas
+* Crear índices
+
+---
+
+7. CREAR USUARIO CON TODOS LOS PRIVILEGIOS SOBRE UNA BASE
+
+---
+
+Crear usuario:
+
+CREATE USER 'admin_bd'@'%' IDENTIFIED BY 'Password123!';
+
+Otorgar permisos:
+
+GRANT ALL PRIVILEGES
+ON sport_store.* TO 'admin_bd'@'%';
+
+Verificar:
+
+SHOW GRANTS FOR 'admin_bd'@'%';
+
+Puede realizar cualquier operación dentro de la base sport_store.
+
+---
+
+8. CREAR SUPERADMIN SOBRE TODAS LAS BASES
+
+---
+
+CREATE USER 'superadmin'@'%' IDENTIFIED BY 'Password123!';
+
+GRANT ALL PRIVILEGES
+ON *.* TO 'superadmin'@'%';
+
+Puede administrar todas las bases del servidor.
+
+---
+
+9. GRANT OPTION
+
+---
+
+GRANT OPTION permite que un usuario otorgue permisos
+a otros usuarios.
+
+Ejemplo:
+
+GRANT SELECT
+ON sport_store.* TO 'consultor'@'%'
+WITH GRANT OPTION;
+
+Ahora consultor puede ejecutar:
+
+GRANT SELECT
+ON sport_store.* TO 'nuevo_usuario'@'%';
+
+Sin GRANT OPTION:
+
+GRANT SELECT
+ON sport_store.* TO 'consultor'@'%';
+
+En este caso NO podrá otorgar permisos a terceros.
+
+---
+
+10. CREAR SUPERADMIN CON GRANT OPTION
+
+---
+
+CREATE USER 'dba'@'%' IDENTIFIED BY 'Password123!';
+
+GRANT ALL PRIVILEGES
+ON *.* TO 'dba'@'%'
+WITH GRANT OPTION;
+
+Puede:
+
+* Crear usuarios
+* Asignar permisos
+* Revocar permisos
+* Administrar todas las bases
+
+---
+
+11. REVOCAR PERMISOS
+
+---
+
+Revocar todos los permisos:
+
+REVOKE ALL PRIVILEGES, GRANT OPTION
+ON sport_store.* FROM 'usuario'@'%';
+
+Otorgar nuevamente solo SELECT:
+
+GRANT SELECT
+ON sport_store.* TO 'usuario'@'%';
+
+---
+
+12. ELIMINAR UN USUARIO
+
+---
+
+DROP USER 'usuario'@'%';
+
+Ejemplo:
+
+DROP USER 'usuario_prueba'@'%';
+
+---
+
+13. VER USUARIOS CONECTADOS
+
+---
+
+SHOW PROCESSLIST;
+
+o
+
+SHOW FULL PROCESSLIST;
+
+---
+
+14. CERRAR UNA SESIÓN
+
+---
+
+Consultar sesiones:
+
+SHOW PROCESSLIST;
+
+Eliminar sesión:
+
+KILL 25;
+
+Donde 25 es el ID de la conexión.
+
+---
+
+15. EJEMPLO RECOMENDADO PARA REPORTES
+
+---
+
+CREATE USER 'consultadb'@'%' IDENTIFIED BY 'Password123!';
+
+GRANT SELECT
+ON sport_store.* TO 'consultadb'@'%';
+
+SHOW GRANTS FOR 'consultadb'@'%';
+
+Resultado esperado:
+
+GRANT USAGE ON *.* TO 'consultadb'@'%';
+GRANT SELECT ON sport_store.* TO 'consultadb'@'%';
+
+Este es el esquema recomendado para:
+
+* Power BI
+* DBeaver
+* HeidiSQL
+* Dashboards
+* Auditorías
+* Reportes
+* Consultas de negocio
+
+No permite modificaciones sobre los datos.
