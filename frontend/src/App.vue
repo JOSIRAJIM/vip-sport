@@ -31,6 +31,7 @@ const toast = reactive({ show: false, message: "", type: "" });
 const loginForm = reactive({ username: "", password: "" });
 
 const products = ref([]);
+const posProducts = ref([]);
 const categories = ref([]);
 const paymentMethods = ref([]);
 const customers = ref([]);
@@ -97,11 +98,15 @@ const taxTotal = computed(() => 0);
 const saleTotal = computed(() => roundMoney(cartTotal.value - discountTotal.value + taxTotal.value));
 const paidTotal = computed(() => roundMoney(payments.value.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)));
 const balance = computed(() => roundMoney(saleTotal.value - paidTotal.value));
+const changeDue = computed(() => roundMoney(Math.max(0, paidTotal.value - saleTotal.value)));
+const balanceDue = computed(() => roundMoney(Math.max(0, balance.value)));
 const canCompleteSale = computed(() => currentShift.value && cart.value.length > 0 && Math.round(balance.value * 100) === 0);
 const lowStockProducts = computed(() => products.value.filter((product) => product.low_stock).slice(0, 8));
 const canManageUsers = computed(() => user.value?.role === "admin");
 const canSeeSupervisorViews = computed(() => ["admin", "supervisor"].includes(user.value?.role));
 const selectedCustomer = computed(() => customers.value.find((item) => Number(item.id) === Number(selectedCustomerId.value)) || null);
+const primaryPayment = computed(() => payments.value[0] || null);
+const posResultProducts = computed(() => (posSearch.value ? productSuggestions.value : posProducts.value).slice(0, 8));
 const selectedCustomerData = computed(() => {
   const customer = selectedCustomer.value;
   if (!customer) {
@@ -301,16 +306,18 @@ async function loadProducts(search = "", active = "") {
 }
 
 async function loadPos() {
-  const [methodResult, shiftResult, customerResult, discountResult] = await Promise.all([
+  const [methodResult, shiftResult, customerResult, discountResult, productResult] = await Promise.all([
     api("/payment-methods"),
     api("/shifts/current"),
     api(`/customers?search=${encodeURIComponent(customerSearch.value)}`),
-    api("/discounts?active=true")
+    api("/discounts?active=true"),
+    api("/products?limit=8")
   ]);
   paymentMethods.value = methodResult.payment_methods;
   currentShift.value = shiftResult.shift;
   customers.value = customerResult.customers;
   discounts.value = discountResult.discounts;
+  posProducts.value = productResult.products;
   if (!payments.value.length && saleTotal.value > 0) {
     setSinglePaymentToTotal();
   }
@@ -454,6 +461,56 @@ function setSinglePaymentToTotal() {
   const method = paymentMethods.value.find((item) => item.code === "cash") || paymentMethods.value[0];
   if (!method) return;
   payments.value = [{ payment_method_id: method.id, amount: saleTotal.value, reference: "" }];
+}
+
+function ensurePrimaryPayment() {
+  if (payments.value.length) return payments.value[0];
+  const method = paymentMethods.value.find((item) => item.code === "cash") || paymentMethods.value[0];
+  if (!method) return null;
+  const payment = { payment_method_id: method.id, amount: saleTotal.value, reference: "" };
+  payments.value = [payment];
+  return payment;
+}
+
+function selectPrimaryPaymentMethod(method) {
+  const payment = ensurePrimaryPayment();
+  if (!payment) return;
+  payment.payment_method_id = method.id;
+  if (method.code === "cash") {
+    payment.reference = "";
+  }
+  if (!Number(payment.amount || 0)) {
+    payment.amount = saleTotal.value;
+  }
+}
+
+function setPrimaryPaymentAmount(amount) {
+  const payment = ensurePrimaryPayment();
+  if (!payment) return;
+  payment.amount = Number(amount || 0);
+}
+
+function productVisualClass(product) {
+  const text = `${product.category_name || ""} ${product.name || ""}`.toLowerCase();
+  if (text.includes("zapat") || text.includes("tenis")) return "shoe";
+  if (text.includes("pantal") || text.includes("legging")) return "bottom";
+  if (text.includes("camis") || text.includes("shirt")) return "shirt";
+  return "default";
+}
+
+function navIcon(itemId) {
+  return {
+    dashboard: "D",
+    pos: "P",
+    inventory: "I",
+    customers: "C",
+    discounts: "%",
+    taxes: "T",
+    returns: "R",
+    reports: "G",
+    shifts: "S",
+    users: "U"
+  }[itemId] || "*";
 }
 
 function addPayment() {
@@ -973,8 +1030,7 @@ onMounted(async () => {
       <div class="brand">
         <span class="brand-mark">SS</span>
         <div>
-          <strong>Sport Store</strong>
-          <span>POS</span>
+          <strong>POS</strong>
         </div>
       </div>
 
@@ -986,13 +1042,15 @@ onMounted(async () => {
           :class="{ active: activeView === item.id }"
           @click="setView(item.id)"
         >
-          {{ item.label }}
+          <span class="nav-icon">{{ navIcon(item.id) }}</span>
+          <span>{{ item.label }}</span>
         </button>
       </nav>
 
       <div class="session-box">
+        <span>Cajero</span>
         <strong>{{ user.full_name }}</strong>
-        <span>{{ user.role }}</span>
+        <span>{{ user.role }} <strong class="online-dot">En linea</strong></span>
         <button class="ghost full" type="button" @click="logout()">Salir</button>
       </div>
     </aside>
@@ -1002,6 +1060,10 @@ onMounted(async () => {
         <div>
           <p class="eyebrow">{{ currentNav.kicker }}</p>
           <h2>{{ currentNav.title }}</h2>
+        </div>
+        <div v-if="activeView === 'pos'" class="topbar-total">
+          <span>TOTAL A PAGAR</span>
+          <strong>{{ formatMoney(saleTotal) }}</strong>
         </div>
       </header>
 
@@ -1067,173 +1129,250 @@ onMounted(async () => {
 
         <template v-else-if="activeView === 'pos'">
           <section class="pos-layout">
-            <section class="panel pos-sale-panel">
-              <div class="panel-header pos-sale-header">
-                <div>
-                  <h3>Venta</h3>
-                  <p v-if="currentShift" class="muted">Turno #{{ currentShift.id }} abierto por {{ currentShift.opened_by_name }}</p>
-                  <p v-else class="muted">Abre un turno para empezar a vender.</p>
-                </div>
-                <div class="pos-sale-total">
-                  <span class="muted">Total</span>
-                  <strong>{{ formatMoney(saleTotal) }}</strong>
-                  <span class="status-pill" :class="{ warn: balance !== 0 }">{{ formatMoney(balance) }} saldo</span>
-                </div>
-              </div>
+            <form v-if="!currentShift" class="toolbar shift-open-inline" @submit.prevent="openShiftFromPos">
+              <label>Base de caja
+                <input v-model.number="openingCash" type="number" min="0" step="100" required>
+              </label>
+              <button class="primary" type="submit">Abrir turno</button>
+            </form>
 
-              <div class="panel-body pos-sale-body">
-                <form v-if="!currentShift" class="toolbar shift-open-inline" @submit.prevent="openShiftFromPos">
-                  <label>Base de caja
-                    <input v-model.number="openingCash" type="number" min="0" step="100" required>
-                  </label>
-                  <button class="primary" type="submit">Abrir turno</button>
-                </form>
-                <div v-else class="shift-strip">
-                  <span>Base {{ formatMoney(currentShift.opening_cash) }}</span>
-                  <span>Total vendido {{ formatMoney(currentShift.total_sales || 0) }}</span>
-                  <span>{{ currentShift.sales_count || 0 }} ventas</span>
-                  <span>Efectivo esperado {{ formatMoney(currentShift.expected_cash) }}</span>
-                </div>
-
-                <div class="pos-search-box">
-                  <label>Buscar producto
-                    <input
-                      ref="productSearchInput"
-                      v-model.trim="posSearch"
-                      autocomplete="off"
-                      placeholder="Codigo de barras, SKU, referencia o producto"
-                      @input="queueProductSuggestions"
-                      @focus="queueProductSuggestions"
-                      @keydown.down.prevent="moveProductSuggestion(1)"
-                      @keydown.up.prevent="moveProductSuggestion(-1)"
-                      @keydown.enter.prevent="confirmProductSearch"
-                      @keydown.esc.prevent="clearProductSearch"
-                    >
-                  </label>
-                  <div v-if="posSearch" class="suggestion-panel" role="listbox">
-                    <p v-if="productSearchLoading" class="muted">Buscando...</p>
-                    <button
-                      v-for="(product, index) in productSuggestions"
-                      :key="product.id"
-                      type="button"
-                      class="suggestion-item"
-                      :class="{ active: index === productSuggestionIndex, disabled: product.stock <= 0 }"
-                      :disabled="product.stock <= 0"
-                      role="option"
-                      @mousedown.prevent="addProductFromSearch(product)"
-                    >
-                      <span>
-                        <strong>{{ product.name }}</strong>
-                        <small>{{ product.sku }} <template v-if="product.reference">/ Ref. {{ product.reference }}</template> <template v-if="product.barcode">/ {{ product.barcode }}</template></small>
-                      </span>
-                      <span>
-                        <strong>{{ formatMoney(product.price) }}</strong>
-                        <small>Stock {{ product.stock }}</small>
-                      </span>
-                    </button>
-                    <p v-if="!productSearchLoading && productSuggestionsQuery === posSearch && !productSuggestions.length" class="muted">Sin resultados.</p>
-                  </div>
-                </div>
-
-                <div class="cart-list pos-cart-list">
-                  <p v-if="!cart.length" class="muted">Carrito vacio.</p>
-                  <div v-for="(item, index) in cart" :key="item.product.id" class="cart-item">
-                    <div>
-                      <strong>{{ item.product.name }}</strong>
-                      <p class="muted">{{ item.product.sku }} <template v-if="item.product.reference">/ {{ item.product.reference }}</template> {{ item.product.size || "" }} {{ item.product.color || "" }}</p>
-                      <p>{{ formatMoney(item.product.price) }} x {{ item.quantity }}</p>
-                    </div>
-                    <div class="quantity-controls">
-                      <button class="ghost mini" type="button" @click="decrementCart(index)">-</button>
-                      <strong>{{ item.quantity }}</strong>
-                      <button class="ghost mini" type="button" @click="incrementCart(index)">+</button>
-                      <button class="danger mini" type="button" @click="removeCart(index)">Quitar</button>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="summary-lines pos-summary">
-                  <div><span>Subtotal</span><span>{{ formatMoney(cartTotal) }}</span></div>
-                  <div v-if="discountTotal > 0"><span>Descuento</span><span>-{{ formatMoney(discountTotal) }}</span></div>
-                  <div v-if="taxTotal > 0"><span>Impuestos</span><span>{{ formatMoney(taxTotal) }}</span></div>
-                </div>
-              </div>
+            <section v-else class="shift-strip">
+              <span>Turno #{{ currentShift.id }}</span>
+              <span>Base {{ formatMoney(currentShift.opening_cash) }}</span>
+              <span>{{ currentShift.sales_count || 0 }} ventas</span>
+              <span>Efectivo esperado {{ formatMoney(currentShift.expected_cash) }}</span>
             </section>
 
-            <section class="grid two pos-checkout-grid">
-              <section class="panel">
-                <div class="panel-header"><h3>Cliente</h3></div>
-                <div class="panel-body grid">
-                  <form class="toolbar" @submit.prevent="searchPos">
-                    <label>Buscar cliente
-                      <input v-model.trim="customerSearch" placeholder="Documento, nombre o telefono">
-                    </label>
-                    <button class="ghost" type="submit">Buscar</button>
-                  </form>
-                  <label>Cliente registrado
-                    <select v-model="selectedCustomerId">
-                      <option value="">Sin cliente registrado</option>
-                      <option v-for="customer in customers" :key="customer.id" :value="customer.id">
-                        {{ customer.full_name }} {{ customer.document_number ? `- ${customer.document_number}` : "" }}
-                      </option>
-                    </select>
-                  </label>
-                  <div class="form-grid compact readonly-customer">
-                    <label>Documento
-                      <input :value="selectedCustomerData.document" readonly>
-                    </label>
-                    <label>Nombre
-                      <input :value="selectedCustomerData.first_name" readonly>
-                    </label>
-                    <label>Apellido
-                      <input :value="selectedCustomerData.last_name" readonly>
-                    </label>
+            <section class="pos-workspace">
+              <div class="pos-left-column">
+                <section class="panel pos-cart-panel">
+                  <div class="panel-header pos-compact-header">
+                    <h3>Carrito (Lista de productos)</h3>
                   </div>
-                </div>
-              </section>
 
-              <section class="panel">
-                <div class="panel-header"><h3>Pago</h3></div>
-                <div class="panel-body grid">
-                  <label>Descuento
-                    <select v-model="selectedDiscountId" @change="setSinglePaymentToTotal">
-                      <option value="">Sin descuento</option>
-                      <option v-for="discount in discounts" :key="discount.id" :value="discount.id">
-                        {{ discount.code }} - {{ discount.name }}
-                      </option>
-                    </select>
-                  </label>
-
-                  <div class="payment-list">
-                    <div v-for="(payment, index) in payments" :key="index" class="payment-row">
-                      <div class="form-grid compact">
-                        <label>Forma
-                          <select v-model.number="payment.payment_method_id">
-                            <option v-for="method in paymentMethods" :key="method.id" :value="method.id">{{ method.name }}</option>
-                          </select>
-                        </label>
-                        <label>Valor
-                          <input v-model.number="payment.amount" type="number" min="0" step="100">
-                        </label>
-                        <label>Referencia
-                          <input v-model.trim="payment.reference">
-                        </label>
+                  <div class="pos-cart-table">
+                    <div class="pos-cart-head">
+                      <span>SKU</span>
+                      <span>Nombre</span>
+                      <span>Cantidad</span>
+                      <span>Precio</span>
+                      <span>Extiende total</span>
+                    </div>
+                    <p v-if="!cart.length" class="pos-empty">Carrito vacio.</p>
+                    <div v-for="(item, index) in cart" :key="item.product.id" class="pos-cart-row">
+                      <div class="sku-cell">
+                        <span class="product-thumb small" :class="productVisualClass(item.product)"></span>
+                        <strong>{{ item.product.sku }}</strong>
                       </div>
-                      <div><button class="ghost mini" type="button" @click="removePayment(index)">Eliminar pago</button></div>
+                      <div>
+                        <strong>{{ item.product.name }}</strong>
+                        <p class="muted">{{ item.product.reference || item.product.category_name || "" }} {{ item.product.size || "" }} {{ item.product.color || "" }}</p>
+                      </div>
+                      <div class="quantity-controls pos-qty">
+                        <span>{{ item.quantity }}x</span>
+                        <button class="ghost mini square" type="button" @click="decrementCart(index)">-</button>
+                        <strong class="qty-number">{{ item.quantity }}</strong>
+                        <button class="ghost mini square" type="button" @click="incrementCart(index)">+</button>
+                        <button class="danger mini square" type="button" @click="removeCart(index)">X</button>
+                      </div>
+                      <strong>{{ formatMoney(item.product.price) }}</strong>
+                      <strong>{{ formatMoney(Number(item.product.price) * item.quantity) }}</strong>
                     </div>
                   </div>
 
-                  <div class="actions">
-                    <button class="ghost" type="button" @click="addPayment">Agregar pago</button>
-                    <button class="ghost" type="button" @click="setSinglePaymentToTotal">Igualar total</button>
+                  <div class="pos-cart-footer">
+                    <div class="subtotal-box">
+                      <span>Subtotal:</span>
+                      <strong>{{ formatMoney(cartTotal) }}</strong>
+                    </div>
                   </div>
-                  <div class="summary-lines">
-                    <div><span>Pagado</span><span>{{ formatMoney(paidTotal) }}</span></div>
-                    <div><span>Saldo</span><span>{{ formatMoney(balance) }}</span></div>
+                </section>
+
+                <section class="panel product-panel">
+                  <div class="panel-header pos-compact-header">
+                    <h3>Producto</h3>
                   </div>
-                  <button class="primary full" type="button" :disabled="!canCompleteSale || loading" @click="completeSale">Finalizar venta</button>
-                </div>
-              </section>
+                  <div class="panel-body product-search-body">
+                    <div class="pos-search-box">
+                      <label>
+                        <span class="screen-reader">Buscar producto</span>
+                        <input
+                          ref="productSearchInput"
+                          v-model.trim="posSearch"
+                          autocomplete="off"
+                          placeholder="Codigo, SKU, referencia o producto"
+                          @input="queueProductSuggestions"
+                          @focus="queueProductSuggestions"
+                          @keydown.down.prevent="moveProductSuggestion(1)"
+                          @keydown.up.prevent="moveProductSuggestion(-1)"
+                          @keydown.enter.prevent="confirmProductSearch"
+                          @keydown.esc.prevent="clearProductSearch"
+                        >
+                      </label>
+                      <button class="search-icon" type="button" @click="confirmProductSearch">Buscar</button>
+                    </div>
+
+                    <h3 class="section-title">Resultados de Busqueda</h3>
+                    <div class="product-results">
+                      <p v-if="productSearchLoading" class="muted">Buscando...</p>
+                      <p v-else-if="posSearch && productSuggestionsQuery === posSearch && !productSuggestions.length" class="muted">Sin resultados.</p>
+                      <button
+                        v-for="product in posResultProducts"
+                        :key="product.id"
+                        type="button"
+                        class="product-card"
+                        :disabled="product.stock <= 0"
+                        @click="addProductFromSearch(product)"
+                      >
+                        <span class="product-thumb" :class="productVisualClass(product)"></span>
+                        <span class="product-info">
+                          <strong>{{ product.name }}</strong>
+                          <small>{{ product.sku }}</small>
+                        </span>
+                        <span class="product-card-bottom">
+                          <strong>{{ formatMoney(product.price) }}</strong>
+                          <span class="inline-qty">
+                            <span>-</span><strong>0</strong><span>+</span>
+                          </span>
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              <aside class="pos-right-column">
+                <section class="panel client-panel">
+                  <div class="panel-body grid tight">
+                    <h3>Cliente</h3>
+                    <form class="customer-search" @submit.prevent="searchPos">
+                      <label>Buscar cliente
+                        <input v-model.trim="customerSearch" placeholder="Documento">
+                      </label>
+                      <button class="ghost" type="submit">Buscar</button>
+                    </form>
+                    <label>Cliente registrado
+                      <select v-model="selectedCustomerId">
+                        <option value="">Sin cliente registrado</option>
+                        <option v-for="customer in customers" :key="customer.id" :value="customer.id">
+                          {{ customer.full_name }} {{ customer.document_number ? `- ${customer.document_number}` : "" }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="customer-fields readonly-customer">
+                      <label>Documento
+                        <input :value="selectedCustomerData.document" readonly>
+                      </label>
+                      <label>Nombre
+                        <input :value="selectedCustomerData.first_name" readonly>
+                      </label>
+                      <label>Apellido
+                        <input :value="selectedCustomerData.last_name" readonly>
+                      </label>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="panel discount-panel">
+                  <div class="panel-body grid tight">
+                    <label>Codigo de Cupon o Descuento General:
+                      <select v-model="selectedDiscountId" @change="setSinglePaymentToTotal">
+                        <option value="">Sin descuento</option>
+                        <option v-for="discount in discounts" :key="discount.id" :value="discount.id">
+                          {{ discount.code }} - {{ discount.name }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="discount-shortcuts">
+                      <button class="ghost mini" type="button" @click="selectedDiscountId = ''; setSinglePaymentToTotal()">Sin desc.</button>
+                      <button
+                        v-for="discount in discounts.slice(0, 2)"
+                        :key="discount.id"
+                        class="ghost mini"
+                        type="button"
+                        @click="selectedDiscountId = discount.id; setSinglePaymentToTotal()"
+                      >
+                        {{ discount.discount_type === "PERCENT" ? `${Number(discount.value)}%` : formatMoney(discount.value) }}
+                      </button>
+                    </div>
+                    <div class="summary-lines compact-lines">
+                      <div><span>Subtotal:</span><span>{{ formatMoney(cartTotal) }}</span></div>
+                      <div><span>Descuento:</span><span class="discount-value">-{{ formatMoney(discountTotal) }}</span></div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="panel payment-panel">
+                  <div class="panel-body grid tight">
+                    <h3>Resumen y Pago</h3>
+                    <div class="pay-total-box">
+                      <span>TOTAL A PAGAR</span>
+                      <strong>{{ formatMoney(saleTotal) }}</strong>
+                    </div>
+
+                    <div class="payment-methods">
+                      <button
+                        v-for="method in paymentMethods"
+                        :key="method.id"
+                        class="ghost payment-method"
+                        :class="{ active: primaryPayment?.payment_method_id === method.id }"
+                        type="button"
+                        @click="selectPrimaryPaymentMethod(method)"
+                      >
+                        {{ method.name }}
+                      </button>
+                    </div>
+
+                    <div v-if="primaryPayment" class="payment-inputs">
+                      <label>Recibido:
+                        <input v-model.number="primaryPayment.amount" type="number" min="0" step="100">
+                      </label>
+                      <label>Referencia
+                        <input v-model.trim="primaryPayment.reference" placeholder="Ingresa monto o usa atajos">
+                      </label>
+                    </div>
+
+                    <div class="cash-shortcuts">
+                      <button class="ghost mini" type="button" @click="setPrimaryPaymentAmount(saleTotal)">Exacto</button>
+                      <button class="ghost mini" type="button" @click="setPrimaryPaymentAmount(10000)">{{ formatMoney(10000) }}</button>
+                      <button class="ghost mini" type="button" @click="setPrimaryPaymentAmount(20000)">{{ formatMoney(20000) }}</button>
+                      <button class="ghost mini" type="button" @click="setPrimaryPaymentAmount(50000)">{{ formatMoney(50000) }}</button>
+                      <button class="ghost mini" type="button" @click="setPrimaryPaymentAmount(100000)">{{ formatMoney(100000) }}</button>
+                    </div>
+
+                    <div class="change-box" :class="{ warn: balanceDue > 0 }">
+                      <span>{{ changeDue > 0 ? "CAMBIO A ENTREGAR (VUELTOS)" : "SALDO PENDIENTE" }}</span>
+                      <strong>{{ formatMoney(changeDue > 0 ? changeDue : balanceDue) }}</strong>
+                    </div>
+
+                    <div v-if="payments.length > 1" class="payment-list secondary-payments">
+                      <div v-for="(payment, index) in payments.slice(1)" :key="index" class="payment-row">
+                        <div class="form-grid compact">
+                          <label>Forma
+                            <select v-model.number="payment.payment_method_id">
+                              <option v-for="method in paymentMethods" :key="method.id" :value="method.id">{{ method.name }}</option>
+                            </select>
+                          </label>
+                          <label>Valor
+                            <input v-model.number="payment.amount" type="number" min="0" step="100">
+                          </label>
+                          <label>Referencia
+                            <input v-model.trim="payment.reference">
+                          </label>
+                        </div>
+                        <button class="ghost mini" type="button" @click="removePayment(index + 1)">Eliminar pago</button>
+                      </div>
+                    </div>
+
+                    <div class="actions checkout-actions">
+                      <button class="ghost" type="button" @click="addPayment">Agregar pago</button>
+                      <button class="ghost" type="button" @click="setSinglePaymentToTotal">Igualar total</button>
+                    </div>
+                    <button class="primary full finalize-button" type="button" :disabled="!canCompleteSale || loading" @click="completeSale">Finalizar venta</button>
+                    <p class="hint center">Verifica valores antes de finalizar</p>
+                  </div>
+                </section>
+              </aside>
             </section>
           </section>
         </template>
